@@ -549,3 +549,35 @@ proptest! {
         config_check_invariants(&client);
     }
 }
+
+#[cfg(test)]
+mod access_control_fuzz_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+
+    #[test]
+    fn many_strangers_never_gain_admin_authority() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        for _ in 0..50 {
+            let stranger = Address::generate(&env);
+            assert!(client.try_pause(&stranger, &String::from_str(&env, "x")).is_err());
+            assert!(client
+                .try_set_config(&stranger, &symbol_short!("high"), &30, &50, &500)
+                .is_err());
+            assert!(client.try_migrate(&stranger).is_err());
+        }
+        client.pause(&admin, &String::from_str(&env, "admin still works"));
+    }
+}
