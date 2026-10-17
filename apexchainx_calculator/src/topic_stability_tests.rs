@@ -332,3 +332,51 @@ mod topic_stability_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod proxy_upgrade_flow_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+
+    #[test]
+    fn integration_migrate_then_normal_operation() {
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+        client.migrate(&admin);
+        client.calculate_sla(&operator, &symbol_short!("OUT1"), &symbol_short!("high"), &10);
+        assert_eq!(client.get_stats().total_calculations, 1);
+    }
+
+    #[test]
+    fn invariant_migrate_does_not_change_stats() {
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+        client.calculate_sla(&operator, &symbol_short!("OUT1"), &symbol_short!("high"), &10);
+        let before = client.get_stats().total_calculations;
+        client.migrate(&admin);
+        client.migrate(&admin);
+        assert_eq!(client.get_stats().total_calculations, before);
+    }
+
+    #[test]
+    fn fuzz_many_strangers_cannot_migrate() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        for _ in 0..50 {
+            let stranger = Address::generate(&env);
+            assert!(client.try_migrate(&stranger).is_err());
+        }
+        client.migrate(&admin);
+    }
+}
