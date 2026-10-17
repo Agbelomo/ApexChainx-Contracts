@@ -339,3 +339,37 @@ mod tests {
         assert!(!retry_state.needs_migration);
     }
 }
+
+#[cfg(test)]
+mod proxy_upgrade_unit_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+
+    #[test]
+    fn stranger_cannot_migrate() {
+        let env = Env::default();
+        let (_, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        assert!(client.try_migrate(&stranger).is_err());
+    }
+
+    #[test]
+    fn migrate_is_idempotent_for_the_admin() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        client.migrate(&admin);
+        client.migrate(&admin);
+        assert!(!client.get_migration_state().needs_migration);
+    }
+}
