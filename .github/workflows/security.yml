@@ -52,3 +52,18 @@ jobs:
       # enforces the full advisories/licenses/bans/sources policy from deny.toml.
       - name: Run cargo deny
         run: cargo deny check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
