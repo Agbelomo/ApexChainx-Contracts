@@ -67,3 +67,33 @@ fn test_storage_key_set_pinned_to_version_snapshot_or_newer() {
         SNAPSHOT_STORAGE_VERSION
     );
 }
+
+#[cfg(test)]
+mod access_control_invariant_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+
+    #[test]
+    fn pause_cycles_never_change_roles_or_stats() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        for _ in 0..10 {
+            client.pause(&admin, &String::from_str(&env, "cycle"));
+            client.unpause(&admin);
+        }
+        assert!(client.try_pause(&stranger, &String::from_str(&env, "x")).is_err());
+        assert_eq!(client.get_stats().total_calculations, 0);
+    }
+}
