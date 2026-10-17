@@ -586,3 +586,47 @@ mod event_state_tests {
         client.prune_history(&stranger, &1);
     }
 }
+
+#[cfg(test)]
+mod access_control_integration_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+
+    #[test]
+    fn admin_handover_moves_authority_to_the_new_admin() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        assert!(client.try_pause(&admin, &String::from_str(&env, "old")).is_err());
+        client.pause(&new_admin, &String::from_str(&env, "new"));
+        client.unpause(&new_admin);
+    }
+
+    #[test]
+    fn operator_rotation_keeps_admin_authority() {
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+        let new_operator = Address::generate(&env);
+        client.set_operator(&admin, &new_operator);
+
+        assert!(client
+            .try_calculate_sla(&operator, &symbol_short!("OUT1"), &symbol_short!("high"), &10)
+            .is_err());
+        client.calculate_sla(&new_operator, &symbol_short!("OUT2"), &symbol_short!("high"), &10);
+        client.pause(&admin, &String::from_str(&env, "still admin"));
+    }
+}
