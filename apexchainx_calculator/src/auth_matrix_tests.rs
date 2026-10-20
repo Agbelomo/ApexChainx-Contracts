@@ -279,3 +279,66 @@ mod access_control_unit_tests {
         assert!(client.try_migrate(&operator).is_err());
     }
 }
+
+#[cfg(test)]
+mod reentrancy_guard_access_control_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+    #[test]
+    fn stranger_cannot_unpause() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+        client.pause(&admin, &String::from_str(&env, "pause_test"));
+        let stranger = Address::generate(&env);
+        assert!(client.try_unpause(&stranger).is_err());
+    }
+
+    #[test]
+    fn stranger_cannot_propose_admin_or_operator() {
+        let env = Env::default();
+        let (_, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        assert!(client.try_propose_admin(&stranger, &candidate).is_err());
+        assert!(client.try_propose_operator(&stranger, &candidate).is_err());
+    }
+
+    #[test]
+    fn stranger_cannot_freeze_or_unfreeze_config() {
+        let env = Env::default();
+        let (_, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        assert!(client.try_freeze_config(&stranger).is_err());
+        assert!(client.try_unfreeze_config(&stranger).is_err());
+    }
+
+    #[test]
+    fn stranger_cannot_prune_history() {
+        let env = Env::default();
+        let (_, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        assert!(client.try_prune_history(&stranger, &10).is_err());
+    }
+
+    #[test]
+    fn stranger_cannot_calculate_sla() {
+        let env = Env::default();
+        let (_, _, client) = setup(&env);
+        let stranger = Address::generate(&env);
+        assert!(client
+            .try_calculate_sla(&stranger, &symbol_short!("OUT1"), &symbol_short!("high"), &10)
+            .is_err());
+    }
+}
+

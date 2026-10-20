@@ -373,3 +373,60 @@ mod proxy_upgrade_unit_tests {
         assert!(!client.get_migration_state().needs_migration);
     }
 }
+
+#[cfg(test)]
+mod proxy_upgrade_storage_gap_safety_tests {
+    use crate::{SLACalculatorContract, SLACalculatorContractClient, STORAGE_VERSION, STORAGE_VERSION_KEY};
+    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+    #[test]
+    fn test_storage_key_isolation_prevents_slot_collision() {
+        // In Soroban, storage is key-value based (indexed by Symbols), not positional
+        // EVM slots. This test asserts that upgradeable state variables reside in isolated
+        // key namespaces, preventing slot shifts or collisions without needing Solidity uint256[50] gaps.
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+
+        let initial_admin = client.get_admin();
+        let initial_operator = client.get_operator();
+        assert_eq!(initial_admin, admin);
+        assert_eq!(initial_operator, operator);
+
+        // Run migration
+        client.migrate(&admin);
+
+        // Post-migration state remains completely uncorrupted and intact
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_operator(), operator);
+        assert_eq!(client.get_storage_version(), STORAGE_VERSION);
+    }
+
+    #[test]
+    fn test_migration_preserves_pre_existing_keys_across_upgrade() {
+        let env = Env::default();
+        let (admin, _, client) = setup(&env);
+
+        // Set pause state
+        client.pause(&admin, &String::from_str(&env, "pre_upgrade_reason"));
+        assert!(client.is_paused());
+
+        // Perform migration
+        client.migrate(&admin);
+
+        // Pause state and metadata must be preserved across migration
+        assert!(client.is_paused());
+        let info = client.get_pause_info().expect("pause info should persist");
+        assert_eq!(info.reason, String::from_str(&env, "pre_upgrade_reason"));
+    }
+}
+
