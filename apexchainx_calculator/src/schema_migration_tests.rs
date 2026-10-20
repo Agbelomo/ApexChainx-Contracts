@@ -373,3 +373,87 @@ mod proxy_upgrade_unit_tests {
         assert!(!client.get_migration_state().needs_migration);
     }
 }
+
+#[cfg(test)]
+mod upgrade_flow_integration_tests {
+    // Issue #757 - integration coverage for the flows a reentrancy guard
+    // would have to protect: the storage migration an upgrade runs.
+    //
+    // The migration is the one path in the contract that rewrites state
+    // wholesale, and it is admin-gated, so the cases that matter are the
+    // ones around who may run it and what it does to the state when it
+    // refuses.
+    use crate::{SLACalculatorContract, SLACalculatorContractClient, STORAGE_VERSION};
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient<'_>) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, contract_id, client)
+    }
+
+    /// A contract whose stored version is newer than the running binary is a
+    /// rollback attempt, not an upgrade: the migration must refuse it.
+    #[test]
+    fn a_version_newer_than_the_binary_is_refused() {
+        let env = Env::default();
+        let (admin, contract_id, client) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&crate::STORAGE_VERSION_KEY, &(STORAGE_VERSION + 1));
+        });
+
+        let result = client.try_migrate(&admin);
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "migrate() must refuse a stored version newer than the binary"
+        );
+    }
+
+    /// A refused migration must not touch the stored state: the version it
+    /// found is still the version it left behind.
+    #[test]
+    fn a_refused_migration_leaves_the_stored_version_untouched() {
+        let env = Env::default();
+        let (admin, contract_id, client) = setup(&env);
+
+        let future_version = STORAGE_VERSION + 1;
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&crate::STORAGE_VERSION_KEY, &future_version);
+        });
+
+        assert!(client.try_migrate(&admin).is_ok());
+        assert_eq!(client.get_migration_state().stored_version, future_version);
+    }
+
+    /// After a full multi-arm migration the contract is still usable: the
+    /// roles the upgrade was supposed to preserve are intact and the version
+    /// is current.
+    #[test]
+    fn the_contract_is_fully_usable_after_a_multi_arm_migration() {
+        let env = Env::default();
+        let (admin, contract_id, client) = setup(&env);
+
+        // Synthesize a v0 contract state, the way an old deployment looks.
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&crate::STORAGE_VERSION_KEY, &0u32);
+        });
+
+        assert!(client.try_migrate(&admin).is_ok());
+        assert_eq!(client.get_migration_state().stored_version, STORAGE_VERSION);
+        assert!(!client.get_migration_state().needs_migration);
+
+        // The roles survived the migration, and an admin-only write still
+        // works on the migrated contract.
+        assert_eq!(client.get_admin(), admin);
+        client.pause(&admin, &soroban_sdk::String::from_str(&env, "post-migration"));
+    }
+}
