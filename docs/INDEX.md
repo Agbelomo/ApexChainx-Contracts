@@ -117,6 +117,8 @@ Legend:
 | [TS_PARITY_CONTRACT.md](TS_PARITY_CONTRACT.md) | **Reference** | TypeScript ↔ contract parity contract |
 | [SC_MARKER_POLICY.md](SC_MARKER_POLICY.md) | **Reference** | `SC-*` marker policy |
 | [SECURITY_REVIEW_TEMPLATE.md](SECURITY_REVIEW_TEMPLATE.md) | **Reference** | Security review template |
+| [REENTRANCY_GUARD_AND_PAUSABLE_REVIEW.md](REENTRANCY_GUARD_AND_PAUSABLE_REVIEW.md) | **Reference** | ReentrancyGuard (#768, #763, #766) and Pausable (#770) review |
+| [UPGRADE_AND_REENTRANCY_REVIEW.md](UPGRADE_AND_REENTRANCY_REVIEW.md) | **Reference** | Upgrade safety, reentrancy guards, and pausable test coverage |
 
 ## Testing & fuzzing
 
