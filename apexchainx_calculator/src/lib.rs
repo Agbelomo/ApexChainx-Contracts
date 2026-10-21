@@ -67,6 +67,8 @@ pub mod governance;
 pub mod history;
 pub mod metadata;
 pub mod metrics;
+pub mod oracle;
+pub use crate::oracle::{AggregatedMetric, MetricReport, OracleConfig, OracleContract, OracleError};
 #[cfg(test)]
 mod orphan_lint_tests;
 #[cfg(test)]

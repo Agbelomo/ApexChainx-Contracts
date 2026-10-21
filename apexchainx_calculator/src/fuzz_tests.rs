@@ -581,3 +581,199 @@ mod access_control_fuzz_tests {
         client.pause(&admin, &String::from_str(&env, "admin still works"));
     }
 }
+
+// Issue #751 / #760 - the cross-contract safety path is the only outbound
+// call path in the crate, so it gets unit coverage and property-based
+// coverage here.
+//
+// The reentrancy review (docs/UPGRADE_AND_REENTRANCY_REVIEW.md) records
+// that this path is where a future outbound call would have to go through,
+// and that the compensation stack is what makes a failed multi-step
+// workflow reversible. These tests pin both halves: that a call reports the
+// right status, and that the compensation stack tracks the calls that were
+// actually made.
+mod cross_contract_safety_tests {
+    use crate::cross_contract_safety::{
+        requires_rollback, safe_invoke_contract, CrossContractCallStatus, CrossContractSafety,
+    };
+    use proptest::prelude::*;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, Vec};
+
+    /// Registers an initialized calculator contract and returns its id: the
+    /// simplest contract that can stand in for a downstream escrow.
+    fn target(env: &Env) -> Address {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, crate::SLACalculatorContract);
+        let client = crate::SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        contract_id
+    }
+
+    // -----------------------------------------------------------------
+    // Unit coverage (#751)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_unreachable_target_is_a_fatal_error() {
+        let env = Env::default();
+        let unknown = Address::generate(&env);
+
+        let result =
+            safe_invoke_contract(&env, &unknown, &symbol_short!("get_admin"), &[]);
+
+        assert_eq!(result.status, CrossContractCallStatus::FatalError);
+    }
+
+    #[test]
+    fn a_reachable_target_succeeds() {
+        let env = Env::default();
+        let contract_id = target(&env);
+
+        let result =
+            safe_invoke_contract(&env, &contract_id, &symbol_short!("get_admin"), &[]);
+
+        assert_eq!(result.status, CrossContractCallStatus::Success);
+    }
+
+    #[test]
+    fn only_fatal_statuses_require_a_rollback() {
+        assert!(requires_rollback(CrossContractCallStatus::FatalError));
+        assert!(requires_rollback(CrossContractCallStatus::DispatchFailed));
+        assert!(!requires_rollback(CrossContractCallStatus::Success));
+        assert!(!requires_rollback(CrossContractCallStatus::RecoverableError));
+        assert!(!requires_rollback(CrossContractCallStatus::Compensated));
+    }
+
+    #[test]
+    fn a_successful_call_registers_one_compensation() {
+        let env = Env::default();
+        let contract_id = target(&env);
+        let mut safety = CrossContractSafety::new(&env);
+
+        let result = safety
+            .call(
+                &env,
+                &contract_id,
+                &symbol_short!("get_admin"),
+                &[],
+                symbol_short!("unlck_fnd"),
+                Vec::new(&env),
+            )
+            .expect("the call should succeed");
+
+        assert_eq!(result.status, CrossContractCallStatus::Success);
+        assert_eq!(safety.depth(), 1);
+        assert!(safety.has_pending());
+    }
+
+    #[test]
+    fn finalizing_clears_the_compensation_stack() {
+        let env = Env::default();
+        let contract_id = target(&env);
+        let mut safety = CrossContractSafety::new(&env);
+
+        safety
+            .call(
+                &env,
+                &contract_id,
+                &symbol_short!("get_admin"),
+                &[],
+                symbol_short!("unlck_fnd"),
+                Vec::new(&env),
+            )
+            .expect("the call should succeed");
+        assert_eq!(safety.depth(), 1);
+
+        safety.finalize(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+    }
+
+    #[test]
+    fn rolling_back_clears_the_compensation_stack() {
+        let env = Env::default();
+        let contract_id = target(&env);
+        let mut safety = CrossContractSafety::new(&env);
+
+        safety
+            .call(
+                &env,
+                &contract_id,
+                &symbol_short!("get_admin"),
+                &[],
+                symbol_short!("unlck_fnd"),
+                Vec::new(&env),
+            )
+            .expect("the call should succeed");
+
+        // The compensation tag names a function the target does not have, so
+        // the compensation itself cannot be applied - the stack must still be
+        // unwound.
+        safety.rollback_all(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+    }
+
+    // -----------------------------------------------------------------
+    // Property coverage (#760)
+    // -----------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// The compensation stack holds exactly one entry per successful
+        /// call, and a rollback empties it again.
+        #[test]
+        fn compensation_depth_tracks_the_number_of_calls(calls in 1u32..8) {
+            let env = Env::default();
+            let contract_id = target(&env);
+            let mut safety = CrossContractSafety::new(&env);
+
+            for _ in 0..calls {
+                safety
+                    .call(
+                        &env,
+                        &contract_id,
+                        &symbol_short!("get_admin"),
+                        &[],
+                        symbol_short!("unlck_fnd"),
+                        Vec::new(&env),
+                    )
+                    .expect("the call should succeed");
+            }
+
+            prop_assert_eq!(safety.depth(), calls);
+            prop_assert!(safety.has_pending());
+
+            safety.rollback_all(&env);
+            prop_assert_eq!(safety.depth(), 0);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        /// The status of a call depends only on whether the target can be
+        /// reached - never on anything the caller passes in.
+        #[test]
+        fn the_status_of_a_call_depends_only_on_reachability(reachable in any::<bool>()) {
+            let env = Env::default();
+            let contract_id = if reachable {
+                target(&env)
+            } else {
+                Address::generate(&env)
+            };
+
+            let result =
+                safe_invoke_contract(&env, &contract_id, &symbol_short!("get_admin"), &[]);
+
+            if reachable {
+                prop_assert_eq!(result.status, CrossContractCallStatus::Success);
+            } else {
+                prop_assert_eq!(result.status, CrossContractCallStatus::FatalError);
+            }
+        }
+    }
+}
