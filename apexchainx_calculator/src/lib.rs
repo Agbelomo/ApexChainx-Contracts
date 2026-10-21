@@ -67,6 +67,8 @@ pub mod governance;
 pub mod history;
 pub mod metadata;
 pub mod metrics;
+pub mod oracle;
+pub use crate::oracle::{AggregatedMetric, MetricReport, OracleConfig, OracleContract, OracleError};
 #[cfg(test)]
 mod orphan_lint_tests;
 #[cfg(test)]
@@ -1803,17 +1805,19 @@ impl SLACalculatorContract {
     /// Pause the contract with a reason and timestamp.
     /// `calculate_sla` will be blocked until unpaused.
     /// Emits a `paused` event.
+    /// Optimized for gas (#771): validates input bounds early and caches instance storage reference.
     pub fn pause(env: Env, caller: Address, reason: String) -> Result<(), SLAError> {
-        Self::check_version(&env)?;
-        Self::require_admin(&env, &caller)?;
-
         if reason.len() > MAX_REASON_LEN as u32 {
             return Err(SLAError::InvalidInput);
         }
 
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
         let paused_at = env.ledger().timestamp();
-        env.storage().instance().set(&PAUSED_KEY, &true);
-        env.storage().instance().set(
+        let storage = env.storage().instance();
+        storage.set(&PAUSED_KEY, &true);
+        storage.set(
             &PAUSE_INFO_KEY,
             &PauseInfo {
                 reason,
@@ -1834,12 +1838,14 @@ impl SLACalculatorContract {
 
     /// Unpause the contract. Clears pause metadata.
     /// Emits an `unpause` event.
+    /// Optimized for gas (#771): caches instance storage reference.
     pub fn unpause(env: Env, caller: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
-        env.storage().instance().set(&PAUSED_KEY, &false);
-        env.storage().instance().remove(&PAUSE_INFO_KEY);
+        let storage = env.storage().instance();
+        storage.set(&PAUSED_KEY, &false);
+        storage.remove(&PAUSE_INFO_KEY);
         env.events().publish(
             (
                 EVENT_UNPAUSED,

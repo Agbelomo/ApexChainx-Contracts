@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+- Oracle integer overflow/underflow protection (#846): all arithmetic and aggregation operations guarded via checked arithmetic, explicit overflow/underflow error variants, and configurable value bounds.
+- Oracle access control modifier audit and enforcement (#844): role-based guards (`require_admin`, `require_reporter`, `require_not_paused`, `require_initialized`) and two-tier lifecycle management.
+- Oracle invariant test suite (#845): verified monotonic timestamps, value bounded intervals, and containment of aggregated metrics within bounds.
+- Oracle integration test suite (#843): end-to-end integration flows covering contract initialization, reporter onboarding, metric ingestion, multi-reporter consensus, and emergency pause/resume.
 - Breaking event ABI generation 2 (#675): topics carry per-name versions;
   `set_int` advances to v2 while unchanged names retain v1. Storage v5 and
   result schema v2 enforce the global breaking-change co-bump policy (#497).

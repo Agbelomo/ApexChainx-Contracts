@@ -32,15 +32,19 @@ Pausable lifecycle management is provided through `pause()`, `unpause()`, `is_pa
 - State-mutating calculation invocations (`calculate_sla`) are blocked while paused (`ContractPaused`) and resume after unpause.
 - Read-only contract queries remain accessible while paused.
 
-## Access control of the upgrade path (#744)
+## Access control of the upgrade path and storage gaps (#744, #764)
 
 `migrate(caller)` calls `caller.require_auth()`, loads `ADMIN_KEY` (`NotInitialized` if absent) and rejects any other caller with `Unauthorized`. It is idempotent at the current version, rejects a stored version newer than the binary (`VersionMismatch`), and publishes a `migrate_done` event with `(stored, current)`. Operators and strangers cannot migrate (see `auth_matrix_tests.rs`).
 
-## Gas / resource use (#741, #752)
+Regarding storage gaps (#764): Solidity upgradeable contracts reserve `uint256[50] __gap` slots to avoid variable collision across inheritance hierarchies. Soroban instance storage is addressed by symbolic keys (`Symbol`) rather than contiguous numerical slots. Layout collision cannot occur, and upgrade safety is enforced by `STORAGE_VERSION`, migration arms in `migrate()`, and the snapshot in `storage_key_invariant_tests.rs` (pinned in `proxy_upgrade_storage_gap_safety_tests`).
+
+## Gas / resource use and Pausable optimization (#741, #752, #771)
 
 - History is stored as per-entry sub-keys with a per-outage index (v3), so appends do not rewrite every retained entry.
 - History length and config count are cached counters (`HISTLEN`, `CFGCNT`) instead of being recomputed on each read.
 - `migrate()` derives the cached values once from the source of truth; read paths use the counters.
 - Migration arms run in sequence in one invocation; each arm only touches the keys it introduces.
+- **Pausable gas optimization (#771)**: `pause` validates input length bounds (`MAX_REASON_LEN`) immediately to fail fast without state lookups on invalid input, and reuses the instance storage handle rather than re-requesting it multiple times. Both `pause` and `unpause` execute well within the 160k instruction budget (verified by `test_pause_invalid_reason_fails_fast_gas` and `test_is_paused_read_gas_efficiency`).
+
 
 

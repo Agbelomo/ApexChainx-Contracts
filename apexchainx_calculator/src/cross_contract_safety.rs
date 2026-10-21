@@ -35,8 +35,52 @@
 //! }
 //! safety.finalize(&env);
 //! ```
-
+//!
+//! # Reentrancy contract (Issue #753)
+//!
+//! This module is the **only** sanctioned way for a contract in this crate to
+//! call another contract. The rules that keep those call paths
+//! reentrancy-safe are:
+//!
+//! 1. **Write state before calling out.** A call must never be made while the
+//!    caller's own state is half-written, because the callee can call back
+//!    into the caller before the caller's state is consistent. Every path that
+//!    reaches [`safe_invoke_contract`] must have persisted the state it
+//!    depends on first.
+//! 2. **One outbound helper.** All outbound calls go through
+//!    [`safe_invoke_contract`] (or [`CrossContractSafety::call`]), so a failure
+//!    is translated into a status instead of panicking, and every call stays
+//!    compensatable.
+//! 3. **A compensation must reverse, not repeat.** The compensation tag
+//!    names a *different* function on the target - the one that undoes the
+//!    call. [`CrossContractSafety::call`] rejects a tag that names the
+//!    function that was just called, because such a compensation would re-run
+//!    the original side effect instead of undoing it.
+//! 4. **Bounded compensation depth.** A workflow may not register more than
+//!    [`MAX_COMPENSATION_DEPTH`] compensations, so a runaway sequence cannot
+//!    grow the stack without bound.
+//!
+//! The calculation, config, governance and `migrate()` paths make no outbound
+//! calls at all, which is why there is no separate reentrancy guard in this
+//! crate - see `docs/UPGRADE_AND_REENTRANCY_REVIEW.md`.
+//!
 use soroban_sdk::{contracttype, Address, Env, Symbol, Val, Vec};
+
+/// Maximum number of compensation actions a single safety tracker may hold
+/// (Issue #756).
+///
+/// A workflow that keeps registering compensations without ever finalising or
+/// rolling back would grow the stack without bound, so the depth is capped.
+/// A call that would exceed the cap is rejected as a fatal error.
+pub const MAX_COMPENSATION_DEPTH: u32 = 32;
+
+/// Error symbol for a call whose compensation stack is already at
+/// [`MAX_COMPENSATION_DEPTH`] (Issue #756).
+pub const ERR_COMPENSATION_DEPTH_EXCEEDED: &str = "COMPENSATION_DEPTH_EXCEEDED";
+
+/// Error symbol for a call whose compensation tag names the very function
+/// that was called, which could not reverse the side effect (Issue #756).
+pub const ERR_INVALID_COMPENSATION_TAG: &str = "INVALID_COMPENSATION_TAG";
 
 /// Status of a cross-contract call.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -145,6 +189,14 @@ impl CrossContractSafety {
     /// `Err(result)` on fatal errors.  When `Err` is returned the caller
     /// should call [`rollback_all`](Self::rollback_all) to unwind prior
     /// calls.
+    ///
+    /// Issue #756 - two inputs are rejected before the call is made: a
+    /// compensation tag that names the function that was just called (it
+    /// could not reverse the call) and a compensation stack that is already at
+    /// [`MAX_COMPENSATION_DEPTH`]. Both are reported as
+    /// [`CrossContractCallStatus::FatalError`] with a distinguishing
+    /// `error_symbol`, so the caller can tell them apart from a failure of
+    /// the target contract.
     pub fn call(
         &mut self,
         env: &Env,
@@ -159,6 +211,28 @@ impl CrossContractSafety {
                 status: CrossContractCallStatus::FatalError,
                 raw_output: Val::from(false),
                 error_symbol: Some(Symbol::new(env, "DEPTH_OVERFLOW")),
+            });
+        }
+
+        // Issue #756 - input validation. A compensation has to name a
+        // *different* function on the target: a tag equal to the function that
+        // was just called would re-run the original side effect instead of
+        // reversing it, so the failure would never be undone.
+        if compensation_tag == function_name.clone() {
+            return Err(SafeCallResult {
+                status: CrossContractCallStatus::FatalError,
+                raw_output: Val::from(false),
+                error_symbol: Some(Symbol::new(env, ERR_INVALID_COMPENSATION_TAG)),
+            });
+        }
+
+        // Issue #756 - input validation. The compensation stack is bounded so
+        // that a workflow which never finalises cannot grow it without limit.
+        if self.compensation_stack.len() >= MAX_COMPENSATION_DEPTH {
+            return Err(SafeCallResult {
+                status: CrossContractCallStatus::FatalError,
+                raw_output: Val::from(false),
+                error_symbol: Some(Symbol::new(env, ERR_COMPENSATION_DEPTH_EXCEEDED)),
             });
         }
 
@@ -481,5 +555,63 @@ mod tests {
         assert_eq!(safety.depth(), 0);
         assert!(!safety.has_pending());
         assert_eq!(safety.checked_remaining_capacity(), Some(MAX_CALL_DEPTH));
+    }
+}
+
+#[cfg(test)]
+mod reentrancy_guard_primitives_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+
+    #[test]
+    fn test_reentrancy_primitive_depth_tracking_and_stack_isolation() {
+        // OpenZeppelin ReentrancyGuard tracks a status flag (_ENTERED / _NOT_ENTERED).
+        // On Soroban, CrossContractSafety maintains a call stack and depth counter that isolates
+        // outbound cross-contract calls and prevents unhandled reentrant state modification.
+        let env = Env::default();
+        let mut safety = CrossContractSafety::new(&env);
+        let mock_target = Address::generate(&env);
+
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+
+        // Push first invocation
+        safety.compensation_stack.push_back((
+            mock_target.clone(),
+            FN_LOCK_FUNDS,
+            CompensationAction {
+                tag: COMP_UNLOCK_FUNDS,
+                args: Vec::new(&env),
+            },
+        ));
+        assert_eq!(safety.depth(), 1);
+        assert!(safety.has_pending());
+
+        // Finalize clears the call frame cleanly (equivalent to resetting guard status)
+        safety.finalize(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+    }
+
+    #[test]
+    fn test_reentrancy_primitive_failure_rollback() {
+        let env = Env::default();
+        let mut safety = CrossContractSafety::new(&env);
+        let mock_target = Address::generate(&env);
+
+        safety.compensation_stack.push_back((
+            mock_target.clone(),
+            FN_LOCK_FUNDS,
+            CompensationAction {
+                tag: COMP_UNLOCK_FUNDS,
+                args: Vec::new(&env),
+            },
+        ));
+        assert_eq!(safety.depth(), 1);
+
+        // When a failure or reentrant anomaly occurs, rollback_all restores clean state
+        safety.rollback_all(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
     }
 }
