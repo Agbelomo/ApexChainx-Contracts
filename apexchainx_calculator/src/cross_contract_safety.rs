@@ -483,3 +483,62 @@ mod tests {
         assert!(result.error_symbol.is_none());
     }
 }
+
+#[cfg(test)]
+mod reentrancy_guard_primitives_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+
+    #[test]
+    fn test_reentrancy_primitive_depth_tracking_and_stack_isolation() {
+        // OpenZeppelin ReentrancyGuard tracks a status flag (_ENTERED / _NOT_ENTERED).
+        // On Soroban, CrossContractSafety maintains a call stack and depth counter that isolates
+        // outbound cross-contract calls and prevents unhandled reentrant state modification.
+        let env = Env::default();
+        let mut safety = CrossContractSafety::new(&env);
+        let mock_target = Address::generate(&env);
+
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+
+        // Push first invocation
+        safety.compensation_stack.push_back((
+            mock_target.clone(),
+            FN_LOCK_FUNDS,
+            CompensationAction {
+                tag: COMP_UNLOCK_FUNDS,
+                args: Vec::new(&env),
+            },
+        ));
+        assert_eq!(safety.depth(), 1);
+        assert!(safety.has_pending());
+
+        // Finalize clears the call frame cleanly (equivalent to resetting guard status)
+        safety.finalize(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+    }
+
+    #[test]
+    fn test_reentrancy_primitive_failure_rollback() {
+        let env = Env::default();
+        let mut safety = CrossContractSafety::new(&env);
+        let mock_target = Address::generate(&env);
+
+        safety.compensation_stack.push_back((
+            mock_target.clone(),
+            FN_LOCK_FUNDS,
+            CompensationAction {
+                tag: COMP_UNLOCK_FUNDS,
+                args: Vec::new(&env),
+            },
+        ));
+        assert_eq!(safety.depth(), 1);
+
+        // When a failure or reentrant anomaly occurs, rollback_all restores clean state
+        safety.rollback_all(&env);
+        assert_eq!(safety.depth(), 0);
+        assert!(!safety.has_pending());
+    }
+}
+

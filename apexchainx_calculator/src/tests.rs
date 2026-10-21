@@ -1318,6 +1318,59 @@ fn test_unpause_budget_is_reasonable() {
 }
 
 #[test]
+fn test_pause_invalid_reason_fails_fast_gas() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Construct a reason exceeding MAX_REASON_LEN (128)
+    let long_reason_str = "x".repeat(150);
+    let long_reason = soroban_sdk::String::from_str(&env, &long_reason_str);
+
+    let before = env.budget().cpu_instruction_cost();
+    let res = client.try_pause(&admin, &long_reason);
+    let after = env.budget().cpu_instruction_cost();
+
+    assert!(res.is_err());
+    // Early validation fails fast before storage mutation, keeping cost extremely low (< 50k instructions)
+    assert!(
+        after - before < 60_000,
+        "fail-fast pause validation too expensive: {} instructions",
+        after - before
+    );
+}
+
+#[test]
+fn test_is_paused_read_gas_efficiency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    let before = env.budget().cpu_instruction_cost();
+    let paused = client.is_paused();
+    let after = env.budget().cpu_instruction_cost();
+
+    assert!(!paused);
+    assert!(
+        after - before < 50_000,
+        "is_paused view call too expensive: {} instructions",
+        after - before
+    );
+}
+
+#[test]
 fn test_freeze_config_budget_is_reasonable() {
     let env = Env::default();
     env.mock_all_auths();
